@@ -23,8 +23,8 @@ A PyTorch implementation of VAE/VQ-VAE for float value tokenization. This projec
 ### Setup
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/float-tokenizer.git
-cd float-tokenizer
+git clone git@github.com:wtmarvel/FloatToknizer.git
+cd FloatToknizer
 
 # Install dependencies
 pip install -r requirements.txt
