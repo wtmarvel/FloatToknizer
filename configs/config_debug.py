@@ -1,5 +1,10 @@
 tag = 'tmp'
-train_script_name = 'train'
+
+is_vqvae = True
+if is_vqvae:
+    train_script_name = 'train'
+else:
+    train_script_name = 'train_vae'
 
 ###############Train#########################
 enable_amp = True

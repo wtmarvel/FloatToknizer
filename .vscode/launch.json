@@ -1,0 +1,16 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Python Debugger",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/main_multi_nodes.py",
+            "console": "integratedTerminal",
+            "args": [
+                "config_file=configs/config_debug.py",
+                "total_batch_size=32"
+            ]
+        }
+    ]
+}
