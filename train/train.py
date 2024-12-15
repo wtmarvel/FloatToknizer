@@ -4,14 +4,16 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.tensorboard import SummaryWriter
-from torch.amp import autocast, GradScaler
+from torch.cuda.amp import autocast, GradScaler
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 from train.ema_pytorch import EMA
 from train.trainer import DistributedTrainerBase
 from helper import cprint, init_seeds
-from net.resnet import resnet18 as net
-from dataloader.dataset_mock import Dataset, CollateFn
+# from net.vae import VAE
+from net.vqvae import VQVAE
+from dataloader.dataset_mock import FloatDataset as Dataset
+from train.loss import VAELoss, VQVAELoss
 
 
 class TrainProcess(DistributedTrainerBase):
@@ -41,7 +43,7 @@ class TrainProcess(DistributedTrainerBase):
         # Initialize the distributed environment
         self.init_distributed_env()
         # Initialize necessary components like dataloaders, model, and tensorboard
-        self.set_meter(['total', ])
+        self.set_meter(['vq', 'recon', 'total'])
         self.set_dataprovider(self.opt)
         self.set_model_and_loss()
         self.load_model()
@@ -97,7 +99,9 @@ class TrainProcess(DistributedTrainerBase):
 
     def set_model_and_loss(self):
         cprint(f'[rank-{self.rank}] Setting up model...', 'cyan')
-        self.model = net().to(self.device)
+        self.model = VQVAE(num_embeddings=self.opt.num_embeddings,
+                           embedding_dim=self.opt.embedding_dim,
+                           commitment_cost=self.opt.commitment_cost).to(self.device)
 
         if self.opt.world_size > 1:
             self.model = nn.SyncBatchNorm.convert_sync_batchnorm(self.model)
@@ -106,12 +110,9 @@ class TrainProcess(DistributedTrainerBase):
 
         self.optim = torch.optim.AdamW(self.model.parameters(), lr=self.opt.learning_rate,
                                        weight_decay=self.opt.weight_decay, betas=[self.opt.beta1, self.opt.beta2])
-        # self.optim = DeepSpeedCPUAdam(self.net.parameters(), lr=opt.learning_rate,
-        #                        betas=(opt.beta1, opt.beta2), weight_decay=0.0001)
 
-        # self.optim = torch.optim.SGD(self.model.parameters(), momentum=0.9, lr=opt.learning_rate)
-
-        self.loss_fn = nn.CrossEntropyLoss().to(self.device)
+        self.loss_fn = VQVAELoss(vq_weight=self.opt.vq_weight).to(self.device)
+        
         if self.rank == 0:
             self.count_parameter(self.model)
 
@@ -150,15 +151,8 @@ class TrainProcess(DistributedTrainerBase):
 
     def preprocess(self, mb):
         for name, x in mb.items():
-            if name in ['image']:
+            if name in ['value']:
                 x = x.to(self.device)
-                if x.shape[-1] == 3:
-                    x = torch.permute(x, [0, 3, 1, 2])  # NHWC->NCHW
-                if x.dtype == torch.uint8:
-                    x = x.float() / 127.5 - 1
-            elif name in ['label']:
-                if isinstance(x, torch.Tensor):
-                    x = x.to(self.device)
             mb[name] = x
         return mb
 
@@ -169,25 +163,24 @@ class TrainProcess(DistributedTrainerBase):
         if opt.world_size > 1:
             self.model.require_backward_grad_sync = False if step % gradient_accu_steps != 0 else True
 
-        with autocast('cuda', enabled=self.opt.enable_amp):
-            output = self.model(mb['image'])
-        total_loss = self.loss_fn(output.float(), mb['label'].long())
+        with autocast(enabled=self.opt.enable_amp):
+            # VQVAE returns (recon, vq_loss, indices)
+            recon, vq_loss, _ = self.model(mb['value'])
+            # Calculate losses using the loss class
+            mb_losses = self.loss_fn(recon, mb['value'], vq_loss)
+            total_loss = mb_losses['total']
 
-        # self.optim.zero_grad()
         scaler.scale(total_loss / gradient_accu_steps).backward()
         if step % gradient_accu_steps == 0:
             scaler.unscale_(self.optim)
             torch.nn.utils.clip_grad_value_(self.model.parameters(), 1)
             scaler.step(self.optim)
             scaler.update()
-            # flush the gradients as soon as we can, no need for this memory anymore
             self.optim.zero_grad()
 
         if opt.world_size > 1:
             torch.distributed.all_reduce(total_loss, op=torch.distributed.ReduceOp.AVG)
 
-        mb_losses = {}
-        mb_losses['total'] = total_loss
         self.update_meter(mb_losses)
         return mb_losses
 
@@ -267,22 +260,25 @@ class TrainProcess(DistributedTrainerBase):
         cnt, loss_sum = 0, 0
         for mb in self.test_loader:
             mb = self.preprocess(mb)
-            B = mb['image'].shape[0]
-            with autocast('cuda', enabled=self.opt.enable_amp):
-                output = self.model(mb['image'])
-            total_loss = self.loss_fn(output.float(), mb['label'].long())
+            B = mb['value'].shape[0]
+            with autocast(enabled=self.opt.enable_amp):
+                # VQVAE returns (recon, vq_loss, indices)
+                recon, vq_loss, _ = self.model(mb['value'])
+                # Calculate losses using loss function
+                mb_losses = self.loss_fn(recon, mb['value'], vq_loss)
+                total_loss = mb_losses['total']
 
-            loss_sum += total_loss * B  # (mean loss) * (img num in the mini-batch)
+            loss_sum += total_loss * B
             cnt += B
 
         loss = loss_sum / cnt
-        if self.opt.test_distributed:  # test on every gpu
+        if self.opt.test_distributed:
             cnt *= self.world_size
             torch.distributed.all_reduce(loss, op=torch.distributed.ReduceOp.AVG)
 
         if self.rank == 0:
             speed = cnt / (time.time() - t0)
             print(
-                f'rank={self.rank} took {(time.time() - t0):0.2f}s num_images={cnt} speed={speed:.2f}imgs/s loss={loss:0.4f}')
+                f'rank={self.rank} took {(time.time() - t0):0.2f}s num_images={cnt} speed={speed:.2f}imgs/s loss={loss:0.6f}')
             self.sw.add_scalar("test/loss", loss, step)
         return loss

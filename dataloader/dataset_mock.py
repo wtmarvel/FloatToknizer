@@ -1,47 +1,21 @@
-import random
-import numpy as np
-import cv2
 import torch
+from torch.utils.data import Dataset
 
-
-class Dataset(torch.utils.data.Dataset):
-    def __init__(self, **kwargs):
-        self.rank = kwargs.get('rank', None)
-        self.training = kwargs.get('training', True)
-        self.verbose = kwargs.get('verbose', False)
-        self.image_size = kwargs.get('image_size', False)
-        self.datalist = kwargs.get('train_data_list') if self.training else kwargs.get('test_data_list')
-        self.N = 10000
-
+class FloatDataset(Dataset):
+    def __init__(self, training=True, **kwargs):
+        super().__init__()
+        self.training = training
+        # Only store size, generate data on-the-fly
+        self.size = 10_000_000 if training else 2048
+        self.min_val = -1
+        self.max_val = 1
+        
     def __len__(self):
-        if self.training:
-            return max(self.N, 10000)
-        else:
-            return self.N
-
-    def __getitem__(self, index):
-        image = torch.randint(0, 255, (self.image_size, self.image_size, 3), dtype=torch.uint8)
-        label = torch.zeros((), dtype=torch.float32)
-
-        return {"image": image,
-                "label": label,
-                }
-
-
-class CollateFn():
-    def __init__(self, *args, **kwargs):
-        pass
-
-    def __call__(self, batch):
-        batch_stack = {}
-        for item in batch:
-            for k, v in item.items():
-                if k in batch_stack:
-                    batch_stack[k].append(v)
-                else:
-                    batch_stack.append([v, ])
-
-        for k, v in batch_stack.items():
-            batch_stack[k] = torch.stack(v)
-
-        return batch_stack
+        return self.size
+        
+    def __getitem__(self, idx):
+        # Generate random float number on-the-fly using torch
+        value = torch.empty(1).uniform_(self.min_val, self.max_val)
+        return {
+            'value': value
+        }
