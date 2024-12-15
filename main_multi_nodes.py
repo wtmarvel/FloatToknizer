@@ -3,11 +3,9 @@ from helper import set_cuda_visible_devices
 
 set_cuda_visible_devices()
 
-import json
-import argparse
 import torch
-from pprint import pprint
-from helper import AttrDict, cprint, get_port, get_opt_from_python_config
+from helper import cprint, get_port, get_config
+from omegaconf import OmegaConf
 import importlib
 
 
@@ -24,29 +22,16 @@ def dynamic_import(train_script_name):
         return None
 
 
-def parse_arguments():
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--tag', type=str, default='tmp', help='tag')
-    parser.add_argument('--config_file', type=str, default='configs/config_debug.py', help='')
-    parser.add_argument('--total_batch_size', type=int, default=None)
-
-    opt = parser.parse_args()
-    opt = AttrDict(vars(opt))
-    return opt
-
-
 def main(rank, local_rank):
     if rank == 0:
         cprint('=> torch version : {}'.format(torch.__version__), 'blue')
         cprint('Initializing Training Process..', 'yellow')
 
-    opt_default = parse_arguments()
-    opt = get_opt_from_python_config(opt_default.config_file)
-    for key, value in vars(opt_default).items():
-        if value is not None:
-            setattr(opt, key, value)
-
-    opt.model_save_dir = os.path.join('ckpts/', opt.tag)
+    # Get configuration
+    opt = get_config()
+    
+    if rank == 0:
+        cprint(f"Config:\n{OmegaConf.to_yaml(opt)}", 'green')
 
     opt.world_size = int(os.environ.get('WORLD_SIZE', '1'))
     opt.gradient_accumulation_steps = max(1, opt.total_batch_size // (opt.world_size * opt.batch_size_per_gpu))
@@ -56,18 +41,17 @@ def main(rank, local_rank):
     if rank == 0:
         tensorboard_logpath = os.path.join(opt.model_save_dir, 'logs')
         os.system('rm -r %s/*.*' % tensorboard_logpath)
-        pprint(vars(opt))
 
     train_script_name = opt.train_script_name if hasattr(opt, 'train_script_name') else 'train'
     TrainProcess = dynamic_import(train_script_name)
     p = TrainProcess(rank, local_rank, opt)
 
-    # Save opt as a JSON file
-    opt_json_path = os.path.join(opt.model_save_dir, 'opt.json')
+    # Save opt as a YAML file
+    opt_yaml_path = os.path.join(opt.model_save_dir, 'config.yaml')
     if rank == 0 and not os.path.exists(opt.model_save_dir):
         os.makedirs(opt.model_save_dir)
-        with open(opt_json_path, 'w') as f:
-            json.dump(opt, f, indent=4)
+        with open(opt_yaml_path, 'w') as f:
+            OmegaConf.save(config=opt, f=f)
 
     p.run()
 

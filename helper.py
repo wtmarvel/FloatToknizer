@@ -8,6 +8,10 @@ import subprocess
 import pickle
 import glob
 import re
+from omegaconf import OmegaConf
+import importlib.util
+import json
+import yaml
 
 
 def cprint(*args, **kwargs):
@@ -267,3 +271,72 @@ def get_gpu_id(num_gpus=1, max_use_mem=1000000, visible_gpus=None, verbose=True,
         print('********************* GPU INFO *********************')
 
     return ids_str
+
+
+############################## load_config ##############################
+def load_json_config(file_path):
+    """Load config from a JSON file"""
+    with open(file_path, 'r') as f:
+        config_dict = json.load(f)
+    return config_dict
+
+def load_yaml_config(file_path):
+    """Load config from a YAML file"""
+    return OmegaConf.load(file_path)
+
+def load_python_config(file_path):
+    """Load config from a Python file into a dictionary"""
+    spec = importlib.util.spec_from_file_location("config", file_path)
+    config_module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(config_module)
+    
+    # Get all non-private attributes from the module
+    config_dict = {k: v for k, v in config_module.__dict__.items() 
+                  if not k.startswith('_')}
+    return config_dict
+
+def get_config(default_config_path='configs/config_debug.py'):
+    """
+    Get configuration from config file and CLI arguments.
+    Supports .py, .yaml, .yml, and .json config files.
+    Priority: CLI args > config file
+    
+    Args:
+        default_config_path: Default path to config file if not specified in CLI
+    
+    Returns:
+        OmegaConf configuration object
+    """
+    # Get CLI arguments
+    cli_conf = OmegaConf.from_cli()
+    
+    # Get config file path
+    config_path = cli_conf.get('config', default_config_path)
+    
+    # Determine file type and load accordingly
+    file_ext = os.path.splitext(config_path)[1].lower()
+    
+    if file_ext == '.py':
+        base_conf = load_python_config(config_path)
+    elif file_ext in ['.yaml', '.yml']:
+        base_conf = load_yaml_config(config_path)
+    elif file_ext == '.json':
+        base_conf = load_json_config(config_path)
+    else:
+        raise ValueError(f"Unsupported config file type: {file_ext}")
+    
+    # Convert to OmegaConf if it's not already
+    if not isinstance(base_conf, OmegaConf):
+        base_conf = OmegaConf.create(base_conf)
+    
+    # Merge configurations (CLI overrides config file)
+    conf = OmegaConf.merge(base_conf, cli_conf)
+    
+    # Post-process some configs
+    if conf.get('total_batch_size') is None:
+        conf.total_batch_size = conf.batch_size_per_gpu * conf.num_gpus
+    
+    # Create model save directory
+    conf.model_save_dir = os.path.join('ckpts/', conf.tag)
+    
+    return conf
