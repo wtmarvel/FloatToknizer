@@ -166,6 +166,10 @@ class TrainerBase(object):
         return None
 
     def delete_older_ckpt(self, dir, maxN=2, verbose=True):
+        # return if rank is not 0
+        if self.rank != 0:
+            return None
+
         if not os.path.isdir(dir):
             return None
 
@@ -179,7 +183,7 @@ class TrainerBase(object):
         for ts in timestamps[maxN:]:
             cmd = 'rm %s' % ts[0]
             if verbose:
-                print(cmd)
+                print(f"[delete_older_ckpt] rank={self.rank} max_save={maxN} cmd={cmd}")
             os.system(cmd)
         return None
 
@@ -292,6 +296,12 @@ class TrainerBase(object):
                 state['model_ema'] = self.model_ema.state_dict()
             torch.save(state, model_path)
             self.last_save_timestamp = time.time()
+
+            # Delete older checkpoints if exceeding max number
+            if hasattr(self.opt, 'num_max_save_models'):
+                self.delete_older_ckpt(save_dir, 
+                                     maxN=self.opt.num_max_save_models, 
+                                     verbose=True)
         return False
 
     def get_match_ckpt(self, model, ckpt_src):
@@ -324,7 +334,7 @@ class DistributedTrainerBase(torch.multiprocessing.Process, TrainerBase):
         for p in model.parameters():
             num_total += p.numel()
             num_learn += p.numel() if p.requires_grad else 0
-        cprint(f'{tag} parameters: {(num_learn / 1e6):0.2f}M(learn)/{(num_total / 1e6):0.2f}M(total)', color='red')
+        cprint(f'{tag} parameters: {(num_learn / 1e3):0.4f}K(learn)/{(num_total / 1e3):0.4f}K(total)', color='red')
 
     def test_dataloader_speed(self, dataloader):
         cnt = 0
